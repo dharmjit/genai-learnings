@@ -1,0 +1,65 @@
+GPU: NVIDIA RTX PRO 6000 Blackwell Server Edition
+SMs 188 · max 1536 threads/SM · 288768 threads/GPU resident · SM clock 2.43 GHz
+
+0. THE COST OF KEEPING THREADS RESIDENT
+   registers / SM           65536 (32-bit) = 256 KiB
+   registers / thread        42.7 at full occupancy
+   register file, whole GPU  47.0 MiB across 188 SMs
+   --> this is where the transistor budget went: thread state,
+       not per-thread cleverness.
+
+1. SINGLE-THREAD LATENCY  (50000000 dependent FMAs, one thread each)
+   one GPU thread       96.1 ms    1.92 ns/FMA
+   one CPU core         53.7 ms    1.07 ns/FMA
+   --> the GPU thread is 1.79x SLOWER
+
+2. THROUGHPUT CROSSOVER  (200000000 FMAs total, spread wider each row)
+        threads   per thread         ms        GFLOP/s
+              1    200000000     384.19            0.5
+             32      6250000      12.01           16.7
+           1024       195312       0.45          441.4
+          32768         6103       0.02        11261.3
+        1048576          190       0.01        16756.0
+        8388608           23       0.02         9031.8
+   --> one thread is slow; a million of them are not.
+
+3. WARP DIVERGENCE  (identical work per lane, 1024 FMAs each)
+     branches           ms vs 1 branch
+            1        0.047      1.00x
+            2        0.089      1.88x
+            4        0.174      3.68x
+            8        0.342      7.20x
+           16        0.670     14.14x
+           32        1.338     28.20x
+   --> every lane did the same work; the warp paid for all of it.
+
+4. LATENCY HIDING  (1 GiB streaming read, varying threads in flight)
+        threads   % of max         ms         GB/s
+            256       0.1%     111.99          9.6
+           2048       0.7%      13.95         77.0
+          12032       4.2%       2.30        466.5
+          48128      16.7%       0.76       1417.4
+          96256      33.3%       0.71       1516.8
+         192512      66.7%       0.70       1528.0
+         385024     133.3%       0.70       1523.6
+         770048     266.7%       0.70       1532.2
+   --> the memory system is only fast if enough warps are asking.
+
+5. MEMORY LATENCY, AND LITTLE'S LAW
+   idle round-trip latency     158.9 ns  (386 cycles at 2.43 GHz)
+   throughput = concurrency / latency, so to sustain 1532 GB/s:
+     1532 GB/s x 159 ns = 243 KB in flight
+     at 16 B per thread that is only ~15213 threads
+
+   But experiment 4 needed far more than that. Invert the law on the
+   measured curve to see the latency each row ACTUALLY experienced:
+        threads         GB/s in flight (KB)  implied lat
+          12032        466.5            193        413 ns
+          48128       1417.4            770        543 ns
+          96256       1516.8           1540       1015 ns
+         192512       1528.0           3080       2016 ns
+         385024       1523.6           6160       4043 ns
+         770048       1532.2          12321       8041 ns
+   --> latency is not a constant. It degrades as you approach
+       saturation, so you need more threads than the idle number
+       suggests. Little's Law gives a FLOOR, not a target.

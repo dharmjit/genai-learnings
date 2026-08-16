@@ -1,0 +1,251 @@
+
+=============== device_probe ===============
+CUDA devices visible: 2
+runtime 12.9, driver supports up to 13.0
+
+GPU 0: NVIDIA RTX PRO 6000 Blackwell Server Edition
+  compute capability      sm_120
+  SMs                     188
+  max threads / SM        1536
+  max threads / block     1024
+  warp size               32
+  registers / block       65536
+  shared mem / block      48 KiB
+  shared mem / SM         100 KiB
+  L2 cache                128 MiB
+  global memory           95.0 GiB
+  memory bus              512-bit
+  async engines           2
+  unified addressing      yes
+  concurrent kernels      yes
+  ECC                     on
+
+GPU 1: NVIDIA RTX PRO 6000 Blackwell Server Edition
+  compute capability      sm_120
+  SMs                     188
+  max threads / SM        1536
+  max threads / block     1024
+  warp size               32
+  registers / block       65536
+  shared mem / block      48 KiB
+  shared mem / SM         100 KiB
+  L2 cache                128 MiB
+  global memory           95.0 GiB
+  memory bus              512-bit
+  async engines           2
+  unified addressing      yes
+  concurrent kernels      yes
+  ECC                     on
+
+achieved device-memory read bandwidth (1 GiB buffer)
+  GPU 0:  1534.5 GB/s
+  GPU 1:  1531.1 GB/s
+
+peer access matrix (can device R read device C directly?)
+          0     1
+   0   self   yes
+   1    yes  self
+
+P2P 0<->1: ENABLED
+
+probe OK
+
+=============== transpose ===============
+
+transpose 8192 x 8192  (256 MiB/buffer, exceeds L2 -> DRAM bound)
+kernel                                     ms         GB/s    vs ref     ok
+---------------------------------- ---------- ------------ --------- ------
+copy (speed of light, no T)             0.367      1462.83    100.0%    yes
+naive (uncoalesced writes)              0.606       886.56     60.6%    yes
+shared, 32-way bank conflict            0.365      1472.20    100.6%    yes
+shared + padding [32][33]               0.365      1470.65    100.5%    yes
+shared + swizzle (no padding)           0.366      1467.57    100.3%    yes
+cublasSgeam                             0.365      1471.43    100.6%    yes
+
+transpose 2048 x 2048  (16 MiB/buffer, FITS in 128 MiB L2)
+kernel                                     ms         GB/s    vs ref     ok
+---------------------------------- ---------- ------------ --------- ------
+copy (speed of light, no T)             0.010      3307.81    100.0%    yes
+naive (uncoalesced writes)              0.042       805.98     24.4%    yes
+shared, 32-way bank conflict            0.016      2052.01     62.0%    yes
+shared + padding [32][33]               0.010      3307.81    100.0%    yes
+shared + swizzle (no padding)           0.010      3287.07     99.4%    yes
+cublasSgeam                             0.011      3004.52     90.8%    yes
+
+Same kernels, two working-set sizes. Compare the conflict row
+against padding/swizzle in each table: the optimisation only pays
+when the kernel is not already starved by DRAM.
+
+=============== matmul ===============
+C[4096x4096] = A[4096x4096] @ B[4096x4096]   137.4 GFLOP per call
+
+fp32 matmul ladder
+kernel                                     ms      TFLOP/s    vs ref     ok
+---------------------------------- ---------- ------------ --------- ------
+1 naive (uncoalesced)                 164.290         0.84      1.1%    yes
+2 coalesced                            25.464         5.40      7.4%    yes
+3 shared tiling 32x32                  16.931         8.12     11.1%    yes
+4 1D reg tiling (TM=8)                  5.300        25.93     35.5%    yes
+5 2D reg tiling + float4                2.854        48.15     65.8%    yes
+6 cuBLAS SGEMM (fp32 ref)               1.880        73.12    100.0%    yes
+
+fp16 tensor-core matmul (vs fp32 above)
+kernel                                     ms      TFLOP/s    vs ref     ok
+---------------------------------- ---------- ------------ --------- ------
+7 WMMA 16x16x16 (fp16)                  2.696        50.98     18.2%    yes
+8 cuBLAS fp16 TC (ref)                  0.490       280.50    100.0%    yes
+
+=============== p2p_bandwidth ===============
+transfer size: 256 MiB
+
+peer access: enabled
+
+
+interconnect bandwidth
+kernel                                     ms         GB/s    vs ref     ok
+---------------------------------- ---------- ------------ --------- ------
+H2D pageable                           10.150        26.45      3.6%    yes
+H2D pinned                              4.671        57.47      7.9%    yes
+D2H pinned                              4.693        57.19      7.8%    yes
+D2D same GPU                            0.367       731.73    100.0%    yes
+GPU0->GPU1 no-P2P (staged)              6.732        39.88      5.4%    yes
+GPU0->GPU1 P2P                          4.934        54.41      7.4%    yes
+GPU1->GPU0 P2P                          4.976        53.95      7.4%    yes
+P2P bidirectional (aggregate)           5.170       103.85     14.2%    yes
+('vs ref' = percent of local same-GPU copy throughput)
+
+The ratio that decides your parallelism strategy:
+  local copy / peer copy = 13x
+  => shipping a tensor to the other GPU costs about what it costs
+     to copy it 13 times locally. Communicate rarely, in bulk,
+     and overlapped with compute.
+
+=============== overlap_streams ===============
+512 MiB, 256 FMA/element, 2 GPUs visible
+
+
+H2D -> compute -> D2H pipelining
+kernel                                     ms GB/s (h<->d)    vs ref     ok
+---------------------------------- ---------- ------------ --------- ------
+1 GPU serial (no streams)              19.655        54.63    100.0%    yes
+1 GPU, 2 streams                       15.046        71.36    130.6%    yes
+1 GPU, 4 streams                       12.804        83.86    153.5%    yes
+1 GPU, 8 streams                       11.698        91.79    168.0%    yes
+2 GPUs, 4 streams each                  8.846       121.39    222.2%    yes
+
+'vs ref' here is speedup over the serial version.
+Note the 2-GPU row: PCIe is now the shared bottleneck, so it does
+not double. Splitting compute is easy; splitting bandwidth is not.
+
+=============== dp_matmul ===============
+P2P 0<->1: ENABLED
+
+hidden size H=4096, weights W[4096x4096] = 64 MiB replicated per GPU
+all-reduce volume is FIXED at 64 MiB regardless of batch size
+
+    batch    1-GPU ms    2-GPU ms  no-comm ms    comm ms   speedup  efficiency
+ --------  ----------  ----------  ----------  ---------  --------  ----------
+      512       0.566       1.785       0.321      1.464     0.32x         16% 
+     2048       1.944       2.507       1.054      1.453     0.78x         39% 
+     8192       7.501       5.156       3.703      1.453     1.45x         73% 
+    32768      32.561      15.786      14.312      1.474     2.06x        103% 
+
+Watch the 'comm ms' column: nearly constant, because the
+all-reduce moves the WEIGHTS, not the data. As the batch grows that
+fixed cost is amortised over more compute and efficiency climbs
+toward 100%. Small batches cannot hide the interconnect.
+
+Contrast with tensor parallelism (05), where the comm volume
+scales WITH the batch and therefore never amortises.
+
+=============== tp_matmul ===============
+P2P 0<->1: ENABLED
+
+MLP block: X[4096x4096] -> W1[4096x16384] -> GeLU -> W2[16384x4096] -> Y[4096x4096]
+weights: 512 MiB total, 256 MiB per GPU when split
+comm volume  strategy A (all-gather Z): 256 MiB
+comm volume  strategy B (all-reduce Y): 64 MiB
+
+
+tensor parallelism strategies
+kernel                                     ms      TFLOP/s    vs ref     ok
+---------------------------------- ---------- ------------ --------- ------
+1 GPU (no parallelism)                 15.007        73.27    100.0%    yes
+TP-B Megatron (all-reduce Y)            9.161       120.03    163.8%    yes
+TP-A naive (all-gather Z)              14.153        77.69    106.0%    yes
+('vs ref' = speedup over 1 GPU; 200% would be perfect scaling)
+
+Strategy B beats A on both axes. But look at the speedup column:
+over PCIe, even the good strategy struggles to reach 2x, because
+the all-reduce moves activations that scale with the batch. This is
+precisely the workload NVLink exists for.
+
+=============== pp_matmul ===============
+P2P 0<->1: ENABLED
+
+8 layers of Y = ReLU(Y @ W[4096x4096]), batch 8192
+stage 0 = layers 0..3 on GPU0, stage 1 = layers 4..7 on GPU1
+activation handoff per microbatch: [b x 4096]
+
+  micro-     time ms    speedup     efficy  bubble meas  bubble pred
+ batches  ----------  ---------  ---------  -----------  -----------
+       1      34.336      0.95x        47%          53%          50% 
+       2      23.705      1.37x        69%          31%          33% 
+       4      20.800      1.56x        78%          22%          20% 
+       8      19.412      1.67x        84%          16%          11% 
+      16      20.802      1.56x        78%          22%           6% 
+
+1-GPU baseline: 32.492 ms (all 8 layers, whole batch)
+
+The measured bubble should track (P-1)/(m+P-1) = 1/(m+1) closely
+at small m and then flatten -- past a point the microbatches get so
+small that the GEMMs stop filling 188 SMs and per-launch overhead
+dominates. That tension, bubble vs. kernel efficiency, is exactly
+what real schedulers (GPipe, 1F1B, interleaved) are tuning.
+
+=============== alltoall_transpose ===============
+P2P 0<->1: ENABLED
+
+A[8192 x 8192] row-block distributed over 2 GPUs
+each GPU owns 128 MiB; the all-to-all moves 64 MiB per GPU
+
+distributed transpose correct: yes
+
+distributed transpose
+kernel                                     ms         GB/s    vs ref     ok
+---------------------------------- ---------- ------------ --------- ------
+1 GPU, whole matrix                     0.374      1434.81    100.0%    yes
+2 GPUs, distributed                     1.503       357.16     24.9%    yes
+  of which: all-to-all                  1.323       101.47      0.0%    yes
+
+The exchange alone is 88% of the distributed runtime. Transpose
+does no arithmetic, so there is nothing to hide the transfer
+behind -- this is the worst case for multi-GPU, and a good reminder
+that splitting a memory-bound op across a slow link can LOSE.
+P2P was enabled for this run.
+
+=============== mlp_2gpu ===============
+P2P 0<->1: ENABLED
+
+8 layers, H=4096, batch=8192
+total weights 512 MiB, activations 128 MiB
+
+strategy                           ms   speedup     comm MiB  weights MiB    ok
+--------------------------  ---------  --------  -----------  ----------- -----
+1 GPU                          32.078     1.00x            0          512   yes
+DP (split batch)               15.067     2.13x            0          512   yes
+TP (split weights)             27.780     1.15x          512          256   yes
+PP (split layers, m=8)         19.731     1.63x          128          256   yes
+
+How to read this:
+  DP is fastest and needs no comm -- but every GPU stores the whole
+     model, so it does nothing for a model that does not fit.
+  TP halves the weight memory but pays an all-reduce per block, and
+     that volume grows with the batch. Over PCIe it is the loser;
+     over NVLink (~10x this link) it would be competitive.
+  PP also halves weight memory and moves the LEAST data by far,
+     which is why it is the strategy of choice across slow links --
+     at the cost of pipeline bubbles and scheduling complexity.
+
+Real systems compose all three: TP inside a node, PP across
+nodes, DP over the whole lot.

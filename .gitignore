@@ -1,0 +1,19 @@
+# compiled artifacts
+bin/
+*.o
+*.so
+*.ptx
+*.cubin
+
+# manim / matplotlib scratch output (final exports are committed)
+media/
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# editor / OS
+.DS_Store
+.vscode/
+.idea/
+*.swp
